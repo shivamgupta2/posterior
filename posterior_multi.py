@@ -2,12 +2,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import multivariate_normal
 from scipy.stats import norm
+import scipy
 
 def compute_score(x, t, R):
-    #print(t, R, x)
-    print('here, x:', x.shape)
     score = (-((x-R)/t) * multivariate_normal.pdf(x, mean=R, cov=t * np.eye(2))[:, :, np.newaxis] * 0.5 - ((x + R)/t) * multivariate_normal.pdf(x, mean=-R, cov=t * np.eye(2))[:, :, np.newaxis] * 0.5)/(multivariate_normal.pdf(x, mean=R, cov=t * np.eye(2))[:, :, np.newaxis] * 0.5 + multivariate_normal.pdf(x, mean=-R, cov=t * np.eye(2))[:, :, np.newaxis] * 0.5)
-    #print(score)
     return score
 
 def create_time_schedule(num_steps, end_time, scale):
@@ -18,7 +16,6 @@ def create_time_schedule(num_steps, end_time, scale):
         cur_time += cur_time * scale
         schedule[i] = cur_time
     schedule = schedule[::-1]
-    #print(schedule)
     return schedule
 
 #vectorized log pdfs for multiple mean vectors (given in shape (num_samples, num_particles, dim)), all with same cov, with multiple x's in shape (num_samples, dim)
@@ -38,14 +35,13 @@ def vectorized_gaussian_logpdf(x, means, covariance):
 #given probs of shape(num_samples, num_particles), produce res of shape(num_samples, num_particles), where each res[i, j] \in [0, num_particles) with probability probs[i, res[i,j]]
 def vectorized_random_choice(probs):
     cumulative_probs = probs.cumsum(axis=1)[:, np.newaxis, :]
-    print('cum probs:', cumulative_probs.shape)
     unif_samples = np.random.rand(probs.shape[0], probs.shape[1])
     res = (cumulative_probs > unif_samples[:,:,np.newaxis]).argmax(axis=2)
     return res
 
 #TODO: rewrite to take forward operator, vectorize
 #edm noise schedule
-def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=50, num_particles=10):
+def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
     dim = R.shape[0]
     cond_samples = np.zeros((num_samples, dim))
     relevant_inv = np.zeros((num_steps, dim, dim))
@@ -57,7 +53,6 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
     measured_noise_for_y = np.einsum('ij,klj->kli', measurement_A, noise_for_y)
     noisy_y = (y + measured_noise_for_y)[:, ::-1, :]
 
-    print('noisy_y:', noisy_y)
     #we know p(x_N | y_N) propto p(x_N) * p(y_N | x_N)
     #we also know that p(x_N) \approx N(0, schedule[0] * I_d)
     #and that p(y_N | x_N) = N(A x_N, meas_var * I_d)
@@ -73,7 +68,7 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
         step_size = schedule[it-1] - schedule[it]
         relevant_inv[it] = np.linalg.inv(measurement_var * np.eye(dim) + step_size * np.dot(measurement_A.T, measurement_A))
 
-        cur_time = schedule[it]
+        cur_time = schedule[it-1]
         uncond_score = compute_score(cur_samples, cur_time, R)
 
         #we know that x_{k-1} | x_k, y_{k-1} is generated with prob. propto p(x_{k-1} | x_k) \cdot p(y_{k-1} | x_{k-1})
@@ -93,30 +88,27 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
         #next_samples has shape(num_samples, num_particles, dim) as expected
         next_samples = np.random.multivariate_normal(np.zeros(dim), x_N_minus_it_covar, (num_samples, num_particles)) + x_N_minus_it_means
         
-        #print(next_samples[0], noisy_y[0,it,:])
 
         #resampling particles
         log_probs = vectorized_gaussian_logpdf(noisy_y[:,it,:], np.einsum('ij,klj->kli', measurement_A, next_samples), measurement_var * np.eye(dim))
         log_probs += vectorized_gaussian_logpdf(next_samples, cur_samples + step_size * uncond_score, step_size * np.eye(dim))
         log_probs -= vectorized_gaussian_logpdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
         #Finally log_probs has shape (num_samples, num_particles)
+        print('log probs shape:', np.max(log_probs, axis=1).shape)
 
         #probs has shape(num_samples, num_particles)
-        probs = np.exp(log_probs - np.max(log_probs, axis=1)[:, np.newaxis])
+        #log_probs = log_probs - np.max(log_probs, axis=1)[:, np.newaxis]
+        log_probs = log_probs - scipy.special.logsumexp(log_probs, axis=1)[:, np.newaxis]
+        probs = np.exp(log_probs)
         probs /= np.sum(probs, axis=1)[:, np.newaxis]
-        #print('probs shape:', probs)
         sample_ids = vectorized_random_choice(probs)
-        print('sample_ids:', sample_ids.shape)
-        #print('next samples 0:', next_samples[0], sample_ids[0])
         cur_samples = next_samples[np.arange(num_samples)[:, np.newaxis], sample_ids]
-        #print('cur_samples 0:', cur_samples[0])
-        print('here cur_samples shape:', cur_samples.shape)
-    print('end cur_samples:', cur_samples[0])
+
     cond_sample_ids = np.random.choice(np.arange(num_particles), size=num_samples)
-    print('cond_sample_ids shape:', cond_sample_ids[:, np.newaxis].shape)
+    print('done!!')
+    print('here:', cond_sample_ids)
     cond_samples = cur_samples[np.arange(num_samples), cond_sample_ids]
-    print('cond_samples shape:', cond_samples.shape)
-    print('cond_samples:', cond_samples[0])
+    print(cond_samples[1], cur_samples[1])
     return cond_samples
 
 def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50):
@@ -137,9 +129,9 @@ def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50):
 
 #Parameters
 R = np.ones(2)
-num_steps = 600
+num_steps = 100
 end_time = 0.1
-schedule = create_time_schedule(num_steps, end_time, 0.01)
+schedule = create_time_schedule(num_steps, end_time, 0.05)
 print(schedule)
 
 #uncond_samples = annealed_uncond_langevin(R, schedule, num_steps)
@@ -151,11 +143,12 @@ print(schedule)
 #print('done with uncond')
 
 meas_A = np.array([[0, 0], [0, 1]])
-meas_var = 5
-meas_y = np.array([0, 0])
+meas_var = 0.1
+meas_y = np.array([0, 0.2])
 cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y)
 plt.scatter(cond_samples[:, 0], cond_samples[:, 1])
-plt.show()
+plt.figure(2)
+#plt.show()
 
 x, y = np.mgrid[-5:5:0.01, -5:5:0.01]
 pos = np.dstack((x, y))
