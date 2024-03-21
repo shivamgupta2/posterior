@@ -53,6 +53,8 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
     #A takes dim->dim, noise_for_y has shape (num_samples, num_steps, dim), final result should be of shape(num_samples, num_steps, dim)
     measured_noise_for_y = np.einsum('ij,klj->kli', measurement_A, noise_for_y)
     noisy_y = (y + measured_noise_for_y)[:, ::-1, :]
+    print('variance:', schedule[0])
+    print('seen var:', np.var(noisy_y[:, 0, 0]))
 
     #we know p(x_N | y_N) propto p(x_N) * p(y_N | x_N)
     #we also know that p(x_N) \approx N(0, schedule[0] * I_d)
@@ -64,6 +66,7 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
     x_N_cond_y_N_cov = (schedule[0] * measurement_var) * np.linalg.inv(measurement_var * np.eye(dim) + schedule[0] * np.dot(measurement_A.T, measurement_A))
     #cur_samples has shape (num_samples, num_particles, dim)
     cur_samples = np.random.multivariate_normal(np.zeros(dim), x_N_cond_y_N_cov, (num_samples, num_particles)) + x_N_cond_y_N_mean[:, np.newaxis, :]
+    print('here cur samples:', cur_samples[0][cur_samples[0, :, 0] < 0])
     print(noisy_y[0,0], cur_samples[0, :10])
 
     for it in range(1, num_steps):
@@ -92,15 +95,17 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
         
 
         #resampling particles
-        log_probs = vectorized_gaussian_logpdf(noisy_y[:,it,:], np.einsum('ij,klj->kli', measurement_A, next_samples), measurement_var * np.eye(dim))
-        log_probs += vectorized_gaussian_logpdf(next_samples, cur_samples + step_size * uncond_score, step_size * np.eye(dim))
-        log_probs -= vectorized_gaussian_logpdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
+        log_probs_term_1 = vectorized_gaussian_logpdf(noisy_y[:,it,:], np.einsum('ij,klj->kli', measurement_A, next_samples), measurement_var * np.eye(dim))
+        log_probs_term_2 = vectorized_gaussian_logpdf(next_samples, cur_samples + step_size * uncond_score, step_size * np.eye(dim))
+        print(log_probs_term_2[0], next_samples[0], cur_samples[0], step_size)
+        log_probs_term_3 = vectorized_gaussian_logpdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
+        log_probs = log_probs_term_1 + log_probs_term_2 - log_probs_term_3
         #Finally log_probs has shape (num_samples, num_particles)
         print('log probs shape:', np.max(log_probs, axis=1).shape)
 
         #probs has shape(num_samples, num_particles)
         #log_probs = log_probs - np.max(log_probs, axis=1)[:, np.newaxis]
-        log_probs = log_probs - scipy.special.logsumexp(log_probs, axis=1)[:, np.newaxis]
+        #log_probs = log_probs - scipy.special.logsumexp(log_probs, axis=1)[:, np.newaxis]
         probs = np.exp(log_probs)
         probs /= np.sum(probs, axis=1)[:, np.newaxis]
         sample_ids = vectorized_random_choice(probs)
@@ -133,7 +138,7 @@ def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50):
 R = np.ones(2)
 num_steps = 500
 end_time = 0.1
-num_particles=100
+num_particles=200
 num_samples = 500
 schedule = create_time_schedule(num_steps, end_time, 0.015)
 print(schedule)
@@ -147,8 +152,8 @@ print(schedule)
 #print('done with uncond')
 
 meas_A = np.array([[0, 0], [0, 1]])
-meas_var = 1e-1
-meas_y = np.array([0, 0.4])
+meas_var = 30
+meas_y = np.array([0, 0])
 cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
 plt.scatter(cond_samples[:, 0], cond_samples[:, 1], label='Particle Filter')
 plt.title('num particles = ' + str(num_particles))
@@ -158,15 +163,17 @@ plt.title('num particles = ' + str(num_particles))
 x, y = np.mgrid[-20:20:0.01, -20:20:0.01]
 pos = np.dstack((x, y))
 uncond_density = 0.5 * multivariate_normal.pdf(pos, R, end_time * np.eye(2)) + 0.5 * multivariate_normal.pdf(pos, -R, end_time * np.eye(2))
+#uncond_density = 2 * np.log(0.5) + scipy.special.logsumexp((multivariate_normal.logpdf(pos, R, end_time * np.eye(2)), multivariate_normal.logpdf(pos, -R, end_time * np.eye(2))))
 
 print(pos.shape)
 Ax = np.copy(pos)
 Ax[:,:,0] = 0
 p_y_cond_x = multivariate_normal.pdf(Ax, meas_y, meas_var * np.eye(2))
-p_y = 0.5 * norm.pdf(meas_y[1], R[1], np.sqrt(end_time + meas_var)) + 0.5 * norm.pdf(meas_y[1], -R[1], np.sqrt(end_time + meas_var))
-print('here:', p_y)
+print('y cond x:', p_y_cond_x.shape)
+#p_y = 0.5 * norm.pdf(meas_y[1], R[1], np.sqrt(end_time + meas_var)) + 0.5 * norm.pdf(meas_y[1], -R[1], np.sqrt(end_time + meas_var))
+#print('here:', p_y)
 
-cond_density = uncond_density * p_y_cond_x/p_y
+cond_density = uncond_density * p_y_cond_x
 cond_density /= np.sum(cond_density)
 flat_density = cond_density.flatten()
 sample_index = np.random.choice(np.arange(len(x) * len(y)), p=flat_density, size=num_samples, replace=False)
