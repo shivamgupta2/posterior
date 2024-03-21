@@ -29,8 +29,9 @@ def vectorized_gaussian_logpdf(x, means, covariance):
     if x.shape == means.shape:
         deviations = x - means
     else:
-        deviations = x[:,np.newaxis,:] - means
-    return -0.5 * (constant + log_det + np.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations))
+        deviations = x[:, np.newaxis,:] - means
+    central_term = np.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations)
+    return -0.5 * (constant + log_det + central_term)
 
 #given probs of shape(num_samples, num_particles), produce res of shape(num_samples, num_particles), where each res[i, j] \in [0, num_particles) with probability probs[i, res[i,j]]
 def vectorized_random_choice(probs):
@@ -63,6 +64,7 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
     x_N_cond_y_N_cov = (schedule[0] * measurement_var) * np.linalg.inv(measurement_var * np.eye(dim) + schedule[0] * np.dot(measurement_A.T, measurement_A))
     #cur_samples has shape (num_samples, num_particles, dim)
     cur_samples = np.random.multivariate_normal(np.zeros(dim), x_N_cond_y_N_cov, (num_samples, num_particles)) + x_N_cond_y_N_mean[:, np.newaxis, :]
+    print(noisy_y[0,0], cur_samples[0, :10])
 
     for it in range(1, num_steps):
         step_size = schedule[it-1] - schedule[it]
@@ -129,9 +131,11 @@ def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50):
 
 #Parameters
 R = np.ones(2)
-num_steps = 100
+num_steps = 500
 end_time = 0.1
-schedule = create_time_schedule(num_steps, end_time, 0.05)
+num_particles=100
+num_samples = 500
+schedule = create_time_schedule(num_steps, end_time, 0.015)
 print(schedule)
 
 #uncond_samples = annealed_uncond_langevin(R, schedule, num_steps)
@@ -143,29 +147,35 @@ print(schedule)
 #print('done with uncond')
 
 meas_A = np.array([[0, 0], [0, 1]])
-meas_var = 0.1
-meas_y = np.array([0, 0.2])
-cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y)
-plt.scatter(cond_samples[:, 0], cond_samples[:, 1])
-plt.figure(2)
+meas_var = 1e-1
+meas_y = np.array([0, 0.4])
+cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
+plt.scatter(cond_samples[:, 0], cond_samples[:, 1], label='Particle Filter')
+plt.title('num particles = ' + str(num_particles))
+#plt.savefig(str(num_particles) + '_particles.pdf')
 #plt.show()
 
-x, y = np.mgrid[-5:5:0.01, -5:5:0.01]
+x, y = np.mgrid[-20:20:0.01, -20:20:0.01]
 pos = np.dstack((x, y))
 uncond_density = 0.5 * multivariate_normal.pdf(pos, R, end_time * np.eye(2)) + 0.5 * multivariate_normal.pdf(pos, -R, end_time * np.eye(2))
 
 print(pos.shape)
 Ax = np.copy(pos)
 Ax[:,:,0] = 0
-print(Ax)
-print(pos.shape, Ax.shape)
 p_y_cond_x = multivariate_normal.pdf(Ax, meas_y, meas_var * np.eye(2))
-p_y = 0.5 * norm.pdf(meas_y[1], R[1], end_time + meas_var) + 0.5 * norm.pdf(meas_y[1], -R[1], end_time + meas_var)
+p_y = 0.5 * norm.pdf(meas_y[1], R[1], np.sqrt(end_time + meas_var)) + 0.5 * norm.pdf(meas_y[1], -R[1], np.sqrt(end_time + meas_var))
 print('here:', p_y)
 
 cond_density = uncond_density * p_y_cond_x/p_y
-plt.contourf(x, y, cond_density)
+cond_density /= np.sum(cond_density)
+flat_density = cond_density.flatten()
+sample_index = np.random.choice(np.arange(len(x) * len(y)), p=flat_density, size=num_samples, replace=False)
 
-print('done with cond')
+selections = pos.reshape(-1, 2)[sample_index]
 
+plt.scatter(selections[:, 0], selections[:, 1], label='True Distribution')
+plt.legend()
+plt.savefig(str(num_particles) + '_particles_vectorized.pdf')
 plt.show()
+
+
