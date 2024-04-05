@@ -12,6 +12,9 @@ def compute_score(x, t, R):
         score = (-((x-R)/t) * multivariate_normal.pdf(x, mean=R, cov=t * np.eye(2))[:, np.newaxis] * 0.5 - ((x + R)/t) * multivariate_normal.pdf(x, mean=-R, cov=t * np.eye(2))[:, np.newaxis] * 0.5)/(multivariate_normal.pdf(x, mean=R, cov=t * np.eye(2))[:, np.newaxis] * 0.5 + multivariate_normal.pdf(x, mean=-R, cov=t * np.eye(2))[:, np.newaxis] * 0.5)
     return score
 
+def compute_vp_score(x, t, R):
+    uncond_score = np.exp(t) * compute_score(np.exp(t) * x, np.exp(2 * t) - 1, R)
+    return uncond_score
 
 
 def create_time_schedule(num_steps, end_time, scale):
@@ -29,18 +32,24 @@ def create_time_schedule(num_steps, end_time, scale):
 #could also be that x has same shape as mean vectors
 #returns log pdfs in shape(num_samples, num_particles)
 def vectorized_gaussian_logpdf(x, means, covariance):
-    print(x.shape, means.shape)
     _, d = covariance.shape
     constant = d * np.log(2 * np.pi)
     _, log_det = np.linalg.slogdet(covariance)
+    print('cov:', covariance, 'log det:', log_det, 'constant:', constant)
     cov_inv = np.linalg.inv(covariance)
     if x.shape == means.shape:
         deviations = x - means
+    elif len(x.shape) > len(means.shape):
+        deviations = x - means[:, None, :]
     else:
-        print('other branch')
-        deviations = x[:, np.newaxis,:] - means
+        print('here:', x[0], means[0,0])
+        deviations = x[:, None, :] - means
+        print('deviations:', deviations[0,0])
     central_term = np.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations)
-    return -0.5 * (constant + log_det + central_term)
+    print('cov and central term:', covariance, central_term[0,0])
+    res = -0.5 * central_term
+    print('log prob:', res[0,0], 'prob:', np.exp(res)[0,0])
+    return res
 
 #given probs of shape(num_samples, num_particles), produce res of shape(num_samples, num_particles), where each res[i, j] \in [0, num_particles) with probability probs[i, res[i,j]]
 def vectorized_random_choice(probs):
@@ -57,60 +66,72 @@ def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y,
 
 #TODO: rewrite to take forward operator, vectorize
 #edm noise schedule
-def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
+def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000, c=1):
     dim = R.shape[0]
     cond_samples = np.zeros((num_samples, dim))
 
+    cur_samples = np.random.multivariate_normal(np.zeros(dim), np.eye(dim), (num_samples,))
+
     rev_schedule = schedule[::-1]
-    noise_for_y = np.zeros((num_samples, num_steps, dim))
-    noise_for_y[:, 1:, :] = np.cumsum(np.random.multivariate_normal(np.zeros(dim), np.eye(dim), (num_samples, len(schedule)-1)) * np.sqrt(rev_schedule[1:] - rev_schedule[:-1])[:, np.newaxis], axis=1)
-    #A takes dim->dim, noise_for_y has shape (num_samples, num_steps, dim), final result should be of shape(num_samples, num_steps, dim)
-    measured_noise_for_y = np.einsum('ij,klj->kli', measurement_A, noise_for_y)
-    noisy_y = (y + measured_noise_for_y)[:, ::-1, :]
+    noisy_y = np.zeros((num_samples, num_steps, dim))
+    noisy_y[:, -1, :] = np.dot(measurement_A, cur_samples.T).T
+    for it in range(num_steps-1, 0, -1):
+        end_time = rev_schedule[0]
+        prev_time = rev_schedule[it]
+        cur_time = rev_schedule[it-1]
+        step_size = rev_schedule[it] - rev_schedule[it-1]
+        bar_alpha_t = np.exp(-2 * prev_time)
+        bar_alpha_t_minus_1 = np.exp(-2 * cur_time)
+        p_k = np.sqrt(((1-c) * (1 - bar_alpha_t_minus_1))/(1 - bar_alpha_t))
+        q_k = np.sqrt(c * (1 - bar_alpha_t_minus_1))
+        noisy_y[:, it-1, :] = np.sqrt(bar_alpha_t_minus_1) * y + p_k * (noisy_y[:, it, :] - np.sqrt(bar_alpha_t) * y) + q_k * np.dot(measurement_A, np.random.multivariate_normal(np.zeros(dim), np.eye(dim), num_samples).T).T
+    next_samples = np.zeros((num_samples,num_particles, dim))
+    next_samples[:, np.arange(num_particles), :] = cur_samples[:, None, :]
+    cur_samples = next_samples
+    for it in range(num_steps-2, -1, -1):
+        print('it:', it)
+        step_size = rev_schedule[it + 1] - rev_schedule[it]
+        prev_time = rev_schedule[it+1]
+        cur_time = rev_schedule[it]
 
-    #we know p(x_N | y_N) propto p(x_N) * p(y_N | x_N)
-    #we also know that p(x_N) \approx N(0, schedule[0] * I_d)
-    #and that p(y_N | x_N) = N(A x_N, meas_var * I_d)
-    #p(x_N | y_N) is then Gaussian with mean (meas_var * I + schdule[0] * A^T A)^{-1} (schedule[0] * A^T y)
-    #and covariance (schedule[0] * meas_var) * (meas_var * I + schedule[0] * A^T A)^{-1}
-    #x_N_cond_y_N_mean has shape(num_samples, dim)
-    x_N_cond_y_N_mean = np.dot(np.linalg.inv(measurement_var * np.eye(dim) + schedule[0] * np.dot(measurement_A.T, measurement_A)), schedule[0] * np.dot(measurement_A.T, noisy_y[:, 0, :].T)).T
-    x_N_cond_y_N_cov = (schedule[0] * measurement_var) * np.linalg.inv(measurement_var * np.eye(dim) + schedule[0] * np.dot(measurement_A.T, measurement_A))
-    cur_samples = np.random.multivariate_normal(np.zeros(dim), x_N_cond_y_N_cov, (num_samples, num_particles)) + x_N_cond_y_N_mean[:, np.newaxis, :]
+        alpha_t_plus_1 = np.exp(-2 * step_size)
+        bar_alpha_t_plus_1 = np.exp(-2 * prev_time)
+        bar_alpha_t = np.exp(-2 * cur_time)
 
-    for it in range(1, num_steps):
-        step_size = schedule[it-1] - schedule[it]
-        relevant_inv = np.linalg.inv(measurement_var * np.eye(dim) + step_size * np.dot(measurement_A.T, measurement_A))
+        uncond_score = compute_vp_score(cur_samples, prev_time, R)
 
-        cur_time = schedule[it-1]
-        uncond_score = compute_score(cur_samples, cur_time, R)
+        Sigma_k_plus_1_DDIM = c * (1 - bar_alpha_t) * np.eye(dim)
+        Sigma_k_plus_1_FPS = np.linalg.inv(np.linalg.inv(Sigma_k_plus_1_DDIM) + (1/(measurement_var * bar_alpha_t)) * np.dot(measurement_A.T, measurement_A))
 
-        #we know that x_{k-1} | x_k, y_{k-1} is generated with prob. propto p(x_{k-1} | x_k) \cdot p(y_{k-1} | x_{k-1})
-        #We have that p(x_{k-1} | x_k) \prop to N(x_k + step_size * uncond_score, step_size * I_d)
-        #We have that p(y_{k-1} | x_{k-1}) \prop to N(A x_{k-1}, meas_var * I_d)
-        #generate x_{k-1} | x_k, y_k-1 - it is Gaussian with mean (meas_var * I + step_size * A^T A)^{-1} * (meas_var * (x_k + step_size * uncond_score) + step_size * A^T y)
-        #and covariance (step_size * meas_var) * (meas_var * I + step_size * A^T A)^{-1}
-        x_N_minus_it_covar = (step_size * measurement_var) * relevant_inv
+        mu_k_plus_1_DDIM = (1/alpha_t_plus_1) * (cur_samples + (1 - bar_alpha_t_plus_1) * uncond_score) - np.sqrt((1 - c) * (1 - bar_alpha_t) * (1 - bar_alpha_t_plus_1)) * uncond_score
+        
+        mu_k_plus_1_FPS_helper_1 = np.einsum('ij,klj->kli', np.linalg.inv(Sigma_k_plus_1_DDIM), mu_k_plus_1_DDIM)
+        mu_k_plus_1_FPS = np.einsum('ij,klj->kli', Sigma_k_plus_1_FPS, mu_k_plus_1_FPS_helper_1 + (1/(measurement_var * bar_alpha_t)) * np.dot(measurement_A.T, noisy_y[:, it, :].T).T[:, None, :])
+
+        next_samples = np.random.multivariate_normal(np.zeros(dim), Sigma_k_plus_1_FPS, (num_samples, num_particles)) + mu_k_plus_1_FPS
+
 
         log_probs = np.zeros((num_samples, num_particles))
-        
-        #x_N_minus_it_mean_helper has shape(num_samples, dim)
-        x_N_minus_it_means_helper = step_size * np.dot(measurement_A.T, noisy_y[:, it, :].T).T
-        x_N_minus_it_means_helper_2 = measurement_var * (cur_samples + step_size * uncond_score) + x_N_minus_it_means_helper[:, np.newaxis, :]
-        #x_N_minus_it_means has shape (num_samples, num_particles, dim)
-        x_N_minus_it_means = np.einsum('ij,klj->kli', relevant_inv, x_N_minus_it_means_helper_2)
-
-        #next_samples has shape(num_samples, num_particles, dim) as expected
-        next_samples = np.random.multivariate_normal(np.zeros(dim), x_N_minus_it_covar, (num_samples, num_particles)) + x_N_minus_it_means
-        
 
         #resampling particles
-        log_probs_term_1 = vectorized_gaussian_logpdf(noisy_y[:,it,:], np.einsum('ij,klj->kli', measurement_A, next_samples), measurement_var * np.eye(dim))
-        log_probs_term_2 = vectorized_gaussian_logpdf(next_samples, cur_samples + step_size * uncond_score, step_size * np.eye(dim))
-        log_probs_term_3 = vectorized_gaussian_logpdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
+        print(measurement_var * bar_alpha_t)
+        #log_probs_term_1 = 0
+        #Ax_for_next_samples = np.einsum('ij,klj->kli', measurement_A, next_samples)
+        Ax_for_next_samples = np.zeros((num_samples, num_particles, dim))
+        for i in range(num_samples):
+            Ax_for_next_samples[i] = np.dot(measurement_A, next_samples[i].T).T
+        print('computing term 1:')
+        log_probs_term_1 = vectorized_gaussian_logpdf(noisy_y[:,it,:], Ax_for_next_samples, measurement_var * bar_alpha_t * np.eye(dim))
+        #log_probs_term_1 = 0
+        print('computing_term 2:')
+        log_probs_term_2 = vectorized_gaussian_logpdf(next_samples, mu_k_plus_1_DDIM, Sigma_k_plus_1_DDIM)
+        log_probs_term_3 = vectorized_gaussian_logpdf(next_samples, mu_k_plus_1_FPS, Sigma_k_plus_1_FPS)
         log_probs = log_probs_term_1 + log_probs_term_2 - log_probs_term_3
+        print('here log_probs:', log_probs.shape, log_probs[0], (log_probs - np.max(log_probs, axis=1)[:, np.newaxis])[0])
 
         probs = np.exp(log_probs - np.max(log_probs, axis=1)[:, np.newaxis])
+        print('probs 0:', probs[0])
+        #probs = np.ones(log_probs.shape)
         probs /= np.sum(probs, axis=1)[:, np.newaxis]
 
         resampled_indices = np.zeros((num_samples, num_particles), dtype=int)
@@ -118,15 +139,14 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
             resampled_indices[i] = np.random.choice(num_particles, size=num_particles, p=probs[i])
             cur_samples[i] = next_samples[i][resampled_indices[i], :]
 
+        if it % 50 == 0:
+            print('it:', it, 'time:', rev_schedule[it])
+            plt.scatter(cur_samples[:,0, 0], cur_samples[:,0, 1])
+            plt.show()
+
         #cur_samples = next_samples[np.arange(num_samples)[:, np.newaxis], resampled_indices]
         #cur_samples = next_samples
 
-        if it % 100 == 0:
-            print('it:', it, 'time:', schedule[it])
-            plt.scatter(next_samples[:, :, 0], next_samples[:, :, 1])
-            plt.show()
-    plt.scatter(next_samples[:, :, 0], next_samples[:, :, 1])
-    plt.show()
 
     cond_samples = cur_samples[:, 0, :]
     #cond_sample_ids = np.random.choice(np.arange(num_particles), size=num_samples)
@@ -135,16 +155,24 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
     #print(cond_samples[1], cur_samples[1])
     return cond_samples
 
-def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50):
+def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50, c=1):
     start_time = schedule[0]
     end_time = schedule[len(schedule)-1]
-    uncond_samples = np.random.multivariate_normal(np.zeros(2), start_time * np.eye(2), num_samples)
+    uncond_samples = np.random.multivariate_normal(np.zeros(2), np.eye(2), num_samples)
     for it in range(1, num_steps):
         cur_time = schedule[it]
+        prev_time = schedule[it-1]
         step_size = schedule[it-1] - schedule[it]
-        uncond_score = compute_score(uncond_samples, cur_time, R)
-        uncond_samples = uncond_samples + step_size * uncond_score + np.random.multivariate_normal(np.zeros(2), step_size * np.eye(2), num_samples)
-        if it % 10000 == 0:
+        uncond_score = compute_vp_score(uncond_samples, prev_time, R)
+        beta_t = 1 - np.exp(-2 * step_size)
+        alpha_t = np.exp(-2 * step_size)
+        bar_alpha_t = np.exp(-2 * prev_time)
+        bar_alpha_t_minus_1 = np.exp(-2 * cur_time)
+        uncond_samples = (1/alpha_t) * (uncond_samples + (1 - bar_alpha_t) * uncond_score) - np.sqrt((1 - c) * (1 - bar_alpha_t_minus_1) * (1 - bar_alpha_t)) * uncond_score\
+                + np.random.multivariate_normal(np.zeros(2), c * (1 - bar_alpha_t_minus_1) * np.eye(2), num_samples)
+        #uncond_samples = (1/np.sqrt(alpha_t)) * uncond_samples + (beta_t/np.sqrt(alpha_t)) * uncond_score + np.random.multivariate_normal(np.zeros(2), beta_t * (1 - bar_alpha_t_minus_1)/(1 - bar_alpha_t) * np.eye(2), num_samples)
+        #uncond_samples =  (2 - np.sqrt(1 -  beta_t)) * uncond_samples + beta_t * uncond_score + np.random.multivariate_normal(np.zeros(2), beta_t * np.eye(2), num_samples)
+        if it % 50 == 0:
             print('it:', it, 'time:', schedule[it])
             #plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
             #plt.show()
@@ -178,17 +206,12 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
 #Parameters
 R = np.ones(2)
 num_steps = 500
-end_time = 0.0001
-num_particles=100
+end_time = 0.01
+num_particles=5
 num_samples = 500
-schedule = create_time_schedule(num_steps, end_time, 0.04)
+schedule = create_time_schedule(num_steps, end_time, 0.02)
 print(schedule)
 
-#uncond_samples = annealed_uncond_langevin(R, schedule, num_steps)
-#plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
-#true_samples = np.random.multivariate_normal(R, end_time * np.eye(2), 3000)
-#plt.scatter(true_samples[:, 0], true_samples[:, 1])
-#plt.show()
 
 #print('done with uncond')
 
@@ -198,6 +221,16 @@ meas_var = 1
 meas_y = np.array([0, 0.8])
 #plt.savefig(str(num_particles) + '_particles.pdf')
 #plt.show()
+
+bar_alpha_end_time = np.exp(-2 * end_time)
+uncond_samples = annealed_uncond_langevin(R, schedule, num_steps, num_samples=num_samples)
+#rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var)
+plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1], label='uncond_samples')
+#plt.scatter(rej_samples[:, 0], rej_samples[:, 1], label='Rejection Sampling')
+plt.legend()
+#true_samples = np.random.multivariate_normal(R, end_time * np.eye(2), 3000)
+#plt.scatter(true_samples[:, 0], true_samples[:, 1])
+plt.show()
 
 x, y = np.mgrid[-20:20:0.01, -20:20:0.01]
 pos = np.dstack((x, y))
@@ -214,7 +247,7 @@ cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y,
 Ax = np.copy(pos)
 Ax[:,:,0] = 0
 #p_y_cond_x = multivariate_normal.logpdf(Ax, meas_y, meas_var * np.eye(2))
-p_y_cond_x = vectorized_gaussian_logpdf_single_mean(Ax, meas_y, meas_var * np.eye(2))
+p_y_cond_x = vectorized_gaussian_logpdf_single_mean(Ax, meas_y, bar_alpha_end_time * meas_var * np.eye(2))
 #print('p_y_cond_x_shape:', p_y_cond_x.shape)
 #p_y = 0.5 * norm.pdf(meas_y[1], R[1], np.sqrt(end_time + meas_var)) + 0.5 * norm.pdf(meas_y[1], -R[1], np.sqrt(end_time + meas_var))
 #print('here:', p_y)
@@ -233,8 +266,8 @@ plt.scatter(selections[:, 0], selections[:, 1], label='True Distribution')
 plt.scatter(cond_samples[:, 0], cond_samples[:, 1], label='Particle Filter')
 plt.title('num particles = ' + str(num_particles))
 
-#rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var)
-#plt.scatter(rej_samples[:, 0], rej_samples[:, 1], label='Rejection Sampling')
+rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var * bar_alpha_end_time)
+plt.scatter(rej_samples[:, 0], rej_samples[:, 1], label='Rejection Sampling')
 
 plt.legend()
 plt.savefig(str(num_particles) + '_particles_vectorized.pdf')
