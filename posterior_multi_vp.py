@@ -47,22 +47,22 @@ def vectorized_gaussian_logpdf(x, means, covariance):
     _, d = covariance.shape
     constant = d * np.log(2 * np.pi)
     _, log_det = np.linalg.slogdet(covariance)
-    print('cov:', covariance, 'log det:', log_det, 'constant:', constant)
+    #print('cov:', covariance, 'log det:', log_det, 'constant:', constant)
     cov_inv = np.linalg.inv(covariance)
     if x.shape == means.shape:
         deviations = x - means
     elif len(x.shape) > len(means.shape):
         deviations = x - means[:, None, :]
     elif len(x.shape) + 2 == len(means.shape):
-        print('here:', x[0], means[0,0])
+        #print('here:', x[0], means[0,0])
         deviations = x[None, None, :] - means
-        print('deviations:', deviations[0,0])
+        #print('deviations:', deviations[0,0])
     else:
         deviations = x[:,None, :] - means
     central_term = np.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations)
-    print('cov and central term:', covariance, central_term[0,0])
+    #print('cov and central term:', covariance, central_term[0,0])
     res = -0.5 * central_term
-    print('log prob:', res[0,0], 'prob:', np.exp(res)[0,0])
+    #print('log prob:', res[0,0], 'prob:', np.exp(res)[0,0])
     return res
 
 def vectorized_gaussian_score(x, means, var):
@@ -90,11 +90,11 @@ def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y,
     
     for it in range(1, len(schedule)):
         cur_time = schedule[it]
-        print(cur_time)
+        #print(cur_time)
         step_size = schedule[it-1] - schedule[it]
         log_w -= logsumexp(log_w, axis=1)[:, np.newaxis]
         w = np.exp(log_w)
-        print('w:', np.sum(w[0]))
+        #print('w:', np.sum(w[0]))
         resampled_indices = np.zeros((num_samples, num_particles), dtype=int)
         for i in range(num_samples):
             resampled_indices[i] = np.random.choice(num_particles, size=num_particles, p=w[i])
@@ -169,7 +169,7 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
         log_probs = np.zeros((num_samples, num_particles))
 
         #resampling particles
-        print(measurement_var * bar_alpha_t)
+        #print(measurement_var * bar_alpha_t)
         Ax_for_next_samples = np.zeros((num_samples, num_particles, dim))
         for i in range(num_samples):
             Ax_for_next_samples[i] = np.dot(measurement_A, next_samples[i].T).T
@@ -223,7 +223,7 @@ def rejection_sampler(R, schedule, num_steps, num_samples, y, meas_A, meas_var):
         unif_samples = np.random.rand(num_samples)
         cond_samples[unif_samples < accept_prob] = uncond_samples[unif_samples < accept_prob]
         done[unif_samples < accept_prob] = np.ones(num_samples, dtype=int)[unif_samples < accept_prob]
-        print(cond_samples[done == 1].shape)
+        #print(cond_samples[done == 1].shape)
     return cond_samples
 
 
@@ -233,9 +233,9 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
     _, log_det = np.linalg.slogdet(covariance)
     cov_inv = np.linalg.inv(covariance)
     deviations = x - mean
-    print(deviations.shape)
+    #print(deviations.shape)
     central_term = np.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations)
-    print('here:', central_term.shape)
+    #print('here:', central_term.shape)
     return -0.5 * central_term
 
 
@@ -255,10 +255,10 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
 R = np.ones(2)
 num_steps = 500
 end_time = 0.01
-num_particles=10
+num_particles=100
 num_samples = 500
 schedule = create_time_schedule(num_steps, end_time, 0.02)
-print(schedule)
+#print(schedule)
 
 
 #print('done with uncond')
@@ -273,16 +273,16 @@ meas_y = np.array([0,0.8])
 bar_alpha_end_time = np.exp(-2 * end_time)
 uncond_samples = annealed_uncond_langevin(R, schedule, num_steps, num_samples=num_samples)
 #rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var)
-plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1], label='uncond_samples')
+#plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1], label='uncond_samples')
 #plt.scatter(rej_samples[:, 0], rej_samples[:, 1], label='Rejection Sampling')
-plt.legend()
+#plt.legend()
 #true_samples = np.random.multivariate_normal(R, end_time * np.eye(2), 3000)
 #plt.scatter(true_samples[:, 0], true_samples[:, 1])
-plt.show()
+#plt.show()
 
 x, y = np.mgrid[-20:20:0.01, -20:20:0.01]
 pos = np.dstack((x, y))
-print('pos:', pos.shape)
+#print('pos:', pos.shape)
 #uncond_density1 = 0.5 * multivariate_normal.pdf(pos, R, end_time * np.eye(2)) + 0.5 * multivariate_normal.pdf(pos, -R, end_time * np.eye(2))
 #uncond_density2 = np.log(0.5) + scipy.special.logsumexp((multivariate_normal.logpdf(pos, R, end_time * np.eye(2)), multivariate_normal.logpdf(pos, -R, end_time * np.eye(2))))
 uncond_density = np.log(0.5) + np.logaddexp(vectorized_gaussian_logpdf_single_mean(pos, R, end_time * np.eye(2)), vectorized_gaussian_logpdf_single_mean(pos, -R, end_time * np.eye(2)))
