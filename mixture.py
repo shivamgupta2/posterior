@@ -39,7 +39,8 @@ class GaussianMixture:
         """
         xs: n x d
         """
-        #xs = torch.tensor(xs)
+        if type(xs) != torch.Tensor:
+            xs = torch.tensor(xs)
         #print("SCORE", xs.shape)
         if len(xs.shape) == 1:
             xs = xs.reshape((1, -1))
@@ -141,7 +142,7 @@ class GaussianMixture:
         g = torch.autograd.grad(torch.sum(fn(xs)), xs)
         #print('grad', g)
         score += g[0]
-        xs.detach()
+        score = score.detach()
         return score
 
     def ptildedist(self, t, tgap, xtplus, y, measurement_A, measurement_var):

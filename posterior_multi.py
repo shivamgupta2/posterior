@@ -62,7 +62,7 @@ def create_time_schedule_eric(end_time, num_below_one, num_above):
 #could also be that x has same shape as mean vectors
 #returns log pdfs in shape(num_samples, num_particles)
 def vectorized_gaussian_logpdf(x, means, covariance):
-    print(x.shape, means.shape)
+    #print(x.shape, means.shape)
     _, d = covariance.shape
     constant = d * np.log(2 * np.pi)
     _, log_det = np.linalg.slogdet(covariance)
@@ -70,7 +70,7 @@ def vectorized_gaussian_logpdf(x, means, covariance):
     if x.shape == means.shape:
         deviations = x - means
     elif len(x.shape) + 2 == len(means.shape):
-        print('other branch')
+        #print('other branch')
         deviations = x[np.newaxis, np.newaxis,:] - means
     else:
         deviations = x[:, np.newaxis, :] - means
@@ -102,16 +102,17 @@ def resample(X, logw, num_particles):
     for i in range(num_samples):
         #print(num_particles)
         #print(logw[i])
+        #print(logw[i] - torch.max(logw[i]))
         w = torch.exp(logw[i] - torch.max(logw[i]))
         #print('WWWW', w)
-        X[i] = X[i][torch.multinomial(w, num_particles)]
+        X[i] = X[i][torch.multinomial(w, num_particles, replacement=True)]
 
     X = X.reshape(-1, d)
     return X
 
-def lognormpdf(mu, sigma):
+def lognormpdf(mu, sigma2):
     # XXX I think the other terms cancel anyway
-    return - torch.sum(mu**2, axis=1) / (2 * sigma**2)
+    return - torch.sum(mu**2, axis=1) / (2 * sigma2)
 
 
 def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
@@ -154,20 +155,28 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
         #print(f'Variance: {torch.mean(x**2, axis=0).detach().numpy()}/{t+variances[0]} = {(torch.mean(x**2, axis=0)/(t+variances[0])).detach().numpy()}')
         
         #XXX check diffusion SDE
-        logw = lognormpdf(newx - (oldx + tgap * p.getSmoothed(t).score(oldx)), tgap)
+        logw = lognormpdf(newx - (oldx + tgap * p.getSmoothed(schedule[i-1]).score(oldx)), tgap)
+        logw -= lognormpdf(newx - center, tgap)
         logw += p.logptilde(t, newx, y, measurement_A, measurement_var)
         logw -= p.logptilde(schedule[i-1], oldx, y, measurement_A, measurement_var)
-        logw -= lognormpdf(newx - center, tgap)
 
+
+        if t < .4 and False:
+            import code
+            d = globals()
+            d.update(locals())
+            code.interact(local=d)
+
+        
         x = newx
         if i % 50 == 0 or i in (1, len(schedule)-1):
             right = torch.matmul(x, torch.ones(dim, dtype=torch.float64)) > 0
             print(f'Iteration {i} (t={t:.3f}): {torch.sum(right)/right.shape[0]:.2f} above right.  {num_samples}x{num_particles}={right.shape[0]}')
             #print(f'Variance: {torch.mean(x**2, axis=0)}')
         
-    x = x.detach().numpy()
-    plt.scatter(x[:,0], x[:,1])
-    plt.show()
+    x = x.numpy()
+    #plt.scatter(x[:,0], x[:,1])
+    #plt.show()
     return x[::num_particles]
 
 def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
@@ -184,11 +193,13 @@ def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y,
     
     for it in range(1, len(schedule)):
         cur_time = schedule[it]
-        print(cur_time)
+        last_time = schedule[it-1]
+        if it % 10 == 0:
+            print(it, cur_time)
         step_size = schedule[it-1] - schedule[it]
         log_w -= logsumexp(log_w, axis=1)[:, np.newaxis]
         w = np.exp(log_w)
-        print('w:', np.sum(w[0]))
+        #print('w:', np.sum(w[0]))
         resampled_indices = np.zeros((num_samples, num_particles), dtype=int)
         for i in range(num_samples):
             resampled_indices[i] = np.random.choice(num_particles, size=num_particles, p=w[i])
@@ -197,13 +208,12 @@ def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y,
 
         cond_samples = torch.Tensor(cond_samples)
         cond_samples = cond_samples.requires_grad_()
-        uncond_score = compute_score_torch(cond_samples, cur_time, torch.Tensor(R), variances=torch.Tensor(variances))
-        x_0_given_x_t = cond_samples + cur_time * uncond_score
+        uncond_score = compute_score_torch(cond_samples, last_time, torch.Tensor(R), variances=torch.Tensor(variances))
+        x_0_given_x_t = cond_samples + last_time * uncond_score
         x_0_given_x_t = x_0_given_x_t.double()
         A_x_0_given_x_t = torch.einsum('ij, klj->kli', torch.Tensor(measurement_A).double(), x_0_given_x_t)
         norm_calc = -(1/(2 * measurement_var)) * torch.norm(torch.Tensor(y[None, None, :]) - A_x_0_given_x_t, dim=-1)**2
         norm_calc_sum = torch.sum(norm_calc)
-
         Tilde_p_T_scores = torch.autograd.grad(outputs=norm_calc_sum, inputs=cond_samples)[0]
         
         A_x_0_given_x_t = A_x_0_given_x_t.detach()
@@ -215,8 +225,17 @@ def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y,
         cond_score_approx = uncond_score + Tilde_p_T_scores
 
         next_cond_samples = cond_samples + step_size * cond_score_approx + np.random.multivariate_normal(np.zeros(2), step_size * np.eye(2), (num_samples, num_particles))
-        next_log_Tilde_p_T = vectorized_gaussian_logpdf(y, np.einsum('ij,klj->kli', measurement_A, x_0_given_x_t), measurement_var * np.eye(dim))
+        #next_cond_samples = newx.reshape((num_samples, num_particles, 2))
 
+        # XXXERIC:  I think the below was wrong, x_0_given_x_t above was given cond_samples, you now want given next_cond_samples
+        x_0_given_x_t_next = next_cond_samples + cur_time *compute_score_torch(next_cond_samples, cur_time, torch.Tensor(R), variances=torch.Tensor(variances))
+        next_log_Tilde_p_T = vectorized_gaussian_logpdf(y, np.einsum('ij,klj->kli', measurement_A, x_0_given_x_t_next), measurement_var * np.eye(dim))
+        # That is, the following is a step behind.
+        # next_log_Tilde_p_T = vectorized_gaussian_logpdf(y, np.einsum('ij,klj->kli', measurement_A, x_0_given_x_t), measurement_var * np.eye(dim))
+        # So in fact we could do
+        # log_Tilde_p_T = vectorized_gaussian_logpdf(y, np.einsum('ij,klj->kli', measurement_A, x_0_given_x_t), measurement_var * np.eye(dim))
+
+        
         log_w_term_1 = vectorized_gaussian_logpdf(next_cond_samples, cond_samples + step_size * uncond_score, step_size * np.eye(dim))
 
         #We have Pr[x_t | x_{t+1}, y] = N(x_t; x_{t+1} + \sigma^2 \grad \log p(x_{t+1} | y), sigma^2)
@@ -308,35 +327,53 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
     #print(cond_samples[1], cur_samples[1])
     return cond_samples
 
-def annealed_uncond_langevin(R, schedule, num_steps, num_samples=50):
+def annealed_uncond_langevin(R, schedule, num_samples=50):
+    num_steps = len(schedule)
     variances = np.zeros(2)
     variances[0] = 0.1
     variances[1] = 0.1
     start_time = schedule[0]
-    end_time = schedule[len(schedule)-1]
+    end_time = schedule[-1]
     uncond_samples = np.random.multivariate_normal(np.zeros(2), start_time * np.eye(2), num_samples)
     for it in range(1, num_steps):
         cur_time = schedule[it]
         step_size = schedule[it-1] - schedule[it]
+
+        
         uncond_score = compute_score(uncond_samples, cur_time, R, variances=variances)
+
+        #print(step_size)
+        # Check score calculation is the same, and it is up to 1e-6 error
+        # p = GaussianMixture(2, [variances[0]**.5]*2, [0.5,0.5], [R, -R])
+        # uncond_score2 = p.getSmoothed(cur_time).score(uncond_samples)
+        # print(cur_time, ':')
+        # print(np.linalg.norm(uncond_score - uncond_score2.numpy()))
+        
         uncond_samples = uncond_samples + step_size * uncond_score + np.random.multivariate_normal(np.zeros(2), step_size * np.eye(2), num_samples)
-        if it % 10000 == 0:
+        if it % 100000 == 0:
             print('it:', it, 'time:', schedule[it])
-            #plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
-            #plt.show()
+            plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
+            p = GaussianMixture(2, [variances[0]**.5]*2, [0.5,0.5], [R, -R])
+            samples2 = p.getSmoothed(cur_time).sample(num_samples)
+            plt.scatter(samples2[:, 0], samples2[:, 1])
+            plt.show()
+
+            
     return uncond_samples
 
 def rejection_sampler(R, schedule, num_steps, num_samples, y, meas_A, meas_var):
-    done = np.zeros(num_samples, dtype=int)
-    cond_samples = np.zeros((num_samples, R.shape[0]))
-    while np.sum(done) < num_samples:
-        uncond_samples = annealed_uncond_langevin(R, schedule, num_steps, num_samples)
+    K = 2*num_samples
+    samplesets = []
+    while sum(map(len, samplesets)) < num_samples:
+        uncond_samples = annealed_uncond_langevin(R, schedule, num_samples)
         Ax = np.dot(meas_A, uncond_samples.T).T
         accept_prob = np.exp(-np.linalg.norm(Ax - y, axis=1)**2/(2 * meas_var))
         unif_samples = np.random.rand(num_samples)
-        cond_samples[unif_samples < accept_prob] = uncond_samples[unif_samples < accept_prob]
-        done[unif_samples < accept_prob] = np.ones(num_samples, dtype=int)[unif_samples < accept_prob]
-        print(cond_samples[done == 1].shape)
+        samplesets.append(uncond_samples[unif_samples < accept_prob])
+        #cond_samples[unif_samples < accept_prob] = uncond_samples[unif_samples < accept_prob]
+        #done[unif_samples < accept_prob] = np.ones(num_samples, dtype=int)[unif_samples < accept_prob]
+        print(list(map(len, samplesets)))
+    cond_samples = np.vstack(samplesets)[:num_samples]
     return cond_samples
 
 
@@ -346,7 +383,6 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
     _, log_det = np.linalg.slogdet(covariance)
     cov_inv = np.linalg.inv(covariance)
     deviations = x - mean
-    print(deviations.shape)
     central_term = np.einsum('ijk,kl,ijl->ij', deviations, cov_inv, deviations)
     print('here:', central_term.shape)
     return -0.5 * central_term
@@ -355,15 +391,15 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
 R = np.ones(2)
 num_steps = 500
 end_time = 0.0001
-num_particles=1000
+num_particles = 100
 num_samples = 500
-#schedule = create_time_schedule_eric(end_time, num_steps, num_steps)
-schedule = create_time_schedule(num_steps, end_time, 0.025)
+schedule = create_time_schedule_eric(end_time, num_steps, num_steps//4)
+#schedule = create_time_schedule(num_steps, end_time, 0.025)
 #print(schedule)
 #plt.plot(schedule)
 #plt.show()
 
-uncond_samples = annealed_uncond_langevin(R, schedule, num_steps, 5000)
+uncond_samples = annealed_uncond_langevin(R, schedule, 5000)
 #plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
 #true_samples = np.random.multivariate_normal(R, end_time * np.eye(2), 3000)
 # plt.scatter(true_samples[:, 0], true_samples[:, 1])
@@ -393,32 +429,30 @@ uncond_density = np.log(0.5) + np.logaddexp(vectorized_gaussian_logpdf_single_me
 #print('densisites:', np.sum(np.exp(uncond_density)))
 #cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
 cond_samples = twisted_diffusion_eric(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
+cond_samples2 = twisted_diffusion(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
 
 
 
 #song_cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
 #song_cond_samples = particle_filter(
 
-Ax = np.copy(pos)
-Ax[:,:,0] = 0
-#p_y_cond_x = multivariate_normal.logpdf(Ax, meas_y, meas_var * np.eye(2))
-p_y_cond_x = vectorized_gaussian_logpdf_single_mean(Ax, meas_y, meas_var * np.eye(2))
-#print('p_y_cond_x_shape:', p_y_cond_x.shape)
-#p_y = 0.5 * norm.pdf(meas_y[1], R[1], np.sqrt(end_time + meas_var)) + 0.5 * norm.pdf(meas_y[1], -R[1], np.sqrt(end_time + meas_var))
-#print('here:', p_y)
+# Ax = np.copy(pos)
+# Ax[:,:,0] = 0
+# #p_y_cond_x = multivariate_normal.logpdf(Ax, meas_y, meas_var * np.eye(2))
+# p_y_cond_x = vectorized_gaussian_logpdf_single_mean(Ax, meas_y, meas_var * np.eye(2))
+# #print('p_y_cond_x_shape:', p_y_cond_x.shape)
+# #p_y = 0.5 * norm.pdf(meas_y[1], R[1], np.sqrt(end_time + meas_var)) + 0.5 * norm.pdf(meas_y[1], -R[1], np.sqrt(end_time + meas_var))
+# #print('here:', p_y)
 
 #cond_density = uncond_density * p_y_cond_x
-cond_density = np.exp(uncond_density + p_y_cond_x)
-cond_density /= np.sum(cond_density)
-flat_density = cond_density.flatten()
+# cond_density = np.exp(uncond_density + p_y_cond_x)
+# cond_density /= np.sum(cond_density)
+# flat_density = cond_density.flatten()
 #flat_uncond_density = uncond_density.flatten()
-sample_index = np.random.choice(np.arange(len(x) * len(y)), p=flat_density, size=num_samples, replace=False)
+# sample_index = np.random.choice(np.arange(len(x) * len(y)), p=flat_density, size=num_samples, replace=False)
 
-selections = pos.reshape(-1, 2)[sample_index]
-
-#plt.scatter(selections[:, 0], selections[:, 1], label='True Distribution')
-#plt.scatter(song_cond_samples[:,0], song_cond_samples[:, 1], label='Song Particle Filter')
-plt.scatter(cond_samples[:, 0], cond_samples[:, 1], label='Twisted Diffusion Particle Filter')
+plt.scatter(cond_samples[:, 0], cond_samples[:, 1], label='Twisted Diffusion Particle Filter (Eric)')
+plt.scatter(cond_samples2[:, 0], cond_samples2[:, 1], label='Twisted Diffusion Particle Filter (Shivam)')
 
 rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var)
 plt.scatter(rej_samples[:, 0], rej_samples[:, 1], label='Rejection Sampling')
