@@ -6,6 +6,8 @@ from scipy.special import logsumexp
 import scipy
 import torch
 
+from mixture import GaussianMixture
+
 def compute_score(x, t, R, weights=np.ones(2) * 0.5, variances=np.zeros(2)):
     eff_covar = t * np.eye(2)
     eff_covar[0,0] += variances[0]
@@ -37,6 +39,23 @@ def create_time_schedule(num_steps, end_time, scale):
         schedule[i] = cur_time
     schedule = schedule[::-1]
     return schedule
+
+
+
+def create_time_schedule_eric(end_time, num_below_one, num_above):
+    # In the variance preserving, would be:
+    # step_size proportional to t below 1, to 1 above.
+    # end_time * e^{eps num_below} = 1
+    # eps num_below = log(1/end_time)
+
+    eps = np.log(1/end_time) / num_below_one
+    schedule = np.exp(eps * np.arange(num_below_one)) * end_time
+    last_step_size = 1 - schedule[-1]
+    later_steps = schedule[-1] + (1 + np.arange(num_above)) * last_step_size
+    schedule = np.concatenate([schedule, later_steps])
+    # XXX Variance exploding transforms this somehow, I'm not sure how...
+    schedule = np.exp(schedule)-1
+    return schedule[::-1]
 
 
 #vectorized log pdfs for multiple mean vectors (given in shape (num_samples, num_particles, dim)), all with same cov, with multiple x's in shape (num_samples, dim)
@@ -71,6 +90,85 @@ def vectorized_random_choice(probs):
     unif_samples = np.random.rand(probs.shape[0], probs.shape[1])
     res = (cumulative_probs > unif_samples[:,:,np.newaxis]).argmax(axis=2)
     return res
+
+        
+
+
+def resample(X, logw, num_particles):
+    bigN, d = X.shape
+    num_samples = bigN // num_particles
+    X = torch.tensor(X).reshape(num_samples, num_particles, d)
+    logw = logw.reshape(num_samples, num_particles)
+    for i in range(num_samples):
+        #print(num_particles)
+        #print(logw[i])
+        w = torch.exp(logw[i] - torch.max(logw[i]))
+        #print('WWWW', w)
+        X[i] = X[i][torch.multinomial(w, num_particles)]
+
+    X = X.reshape(-1, d)
+    return X
+
+def lognormpdf(mu, sigma):
+    # XXX I think the other terms cancel anyway
+    return - torch.sum(mu**2, axis=1) / (2 * sigma**2)
+
+
+def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
+    """
+    Means at +R, -R
+    schedule: time steps to use, sorted decreasing
+    num_steps: 500, typically
+    measurement_A: m x d matrix
+    measurement_var: real, noise in each coordinate
+    y: m long vector  [m = 2 atm]
+    """
+    variances = np.zeros(2) + 0.1
+    y = torch.tensor(y)
+    # XXX must be spherical for GaussianMixture atm
+    dim = R.shape[0]
+
+    #measurement_var = 1000
+    p = GaussianMixture(dim, [variances[0]**.5]*2, [0.5,0.5], [R, -R])
+    #p = GaussianMixture(dim, [1], [1], [(0,0)])
+    print(f"P: {p.rs}")
+    pT = p.getSmoothed(schedule[0])
+
+    bigN = num_samples * num_particles
+    # bigN x d
+    x = pT.sample(bigN)
+    logw = p.logptilde(schedule[0], x, y, measurement_A, measurement_var)
+    #w /= torch.max(w)
+
+    for i in range(1, len(schedule)):
+        t = schedule[i]
+        tgap = schedule[i-1] - schedule[i]
+
+        oldx = resample(x, logw, num_particles)
+
+        # XXX paper uses schedule[i]
+        center = oldx + tgap * p.stilde(schedule[i-1], oldx, y, measurement_A, measurement_var)
+
+        newx = center + torch.normal(0, tgap**.5, size=oldx.shape)
+        
+        #print(f'Variance: {torch.mean(x**2, axis=0).detach().numpy()}/{t+variances[0]} = {(torch.mean(x**2, axis=0)/(t+variances[0])).detach().numpy()}')
+        
+        #XXX check diffusion SDE
+        logw = lognormpdf(newx - (oldx + tgap * p.getSmoothed(t).score(oldx)), tgap)
+        logw += p.logptilde(t, newx, y, measurement_A, measurement_var)
+        logw -= p.logptilde(schedule[i-1], oldx, y, measurement_A, measurement_var)
+        logw -= lognormpdf(newx - center, tgap)
+
+        x = newx
+        if i % 50 == 0 or i in (1, len(schedule)-1):
+            right = torch.matmul(x, torch.ones(dim, dtype=torch.float64)) > 0
+            print(f'Iteration {i} (t={t:.3f}): {torch.sum(right)/right.shape[0]:.2f} above right.  {num_samples}x{num_particles}={right.shape[0]}')
+            #print(f'Variance: {torch.mean(x**2, axis=0)}')
+        
+    x = x.detach().numpy()
+    plt.scatter(x[:,0], x[:,1])
+    plt.show()
+    return x[::num_particles]
 
 def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
     variances = np.zeros(2)
@@ -257,26 +355,29 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
 R = np.ones(2)
 num_steps = 500
 end_time = 0.0001
-num_particles=2
+num_particles=1000
 num_samples = 500
+#schedule = create_time_schedule_eric(end_time, num_steps, num_steps)
 schedule = create_time_schedule(num_steps, end_time, 0.025)
-print(schedule)
+#print(schedule)
+#plt.plot(schedule)
+#plt.show()
 
 uncond_samples = annealed_uncond_langevin(R, schedule, num_steps, 5000)
-plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
+#plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
 #true_samples = np.random.multivariate_normal(R, end_time * np.eye(2), 3000)
-#plt.scatter(true_samples[:, 0], true_samples[:, 1])
-ax = plt.gca()
-ax.set_xlim([-3, 3])
-ax.set_ylim([-3, 3])
-plt.show()
+# plt.scatter(true_samples[:, 0], true_samples[:, 1])
+# ax = plt.gca()
+# ax.set_xlim([-3, 3])
+# ax.set_ylim([-3, 3])
+# plt.show()
 
 #print('done with uncond')
 
 meas_A = np.array([[0, 0], [0, 1]])
 meas_var = 0.1
 #meas_var = 1e-2
-meas_y = np.array([0, 0.7])
+meas_y = np.array([0, 0.2])
 #plt.savefig(str(num_particles) + '_particles.pdf')
 #plt.show()
 
@@ -291,7 +392,10 @@ uncond_density = np.log(0.5) + np.logaddexp(vectorized_gaussian_logpdf_single_me
 #print('uncond density shape:', uncond_density.shape)
 #print('densisites:', np.sum(np.exp(uncond_density)))
 #cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
-cond_samples = twisted_diffusion(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
+cond_samples = twisted_diffusion_eric(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
+
+
+
 #song_cond_samples = particle_filter(R, schedule, num_steps, meas_A, meas_var, meas_y, num_samples=num_samples, num_particles=num_particles)
 #song_cond_samples = particle_filter(
 
@@ -315,10 +419,16 @@ selections = pos.reshape(-1, 2)[sample_index]
 #plt.scatter(selections[:, 0], selections[:, 1], label='True Distribution')
 #plt.scatter(song_cond_samples[:,0], song_cond_samples[:, 1], label='Song Particle Filter')
 plt.scatter(cond_samples[:, 0], cond_samples[:, 1], label='Twisted Diffusion Particle Filter')
-plt.title('num particles = ' + str(num_particles))
 
 rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var)
 plt.scatter(rej_samples[:, 0], rej_samples[:, 1], label='Rejection Sampling')
+
+cond_samples = np.array(cond_samples)
+frac_rej = np.sum(rej_samples.dot([1,1]) < 0) / len(rej_samples)
+frac_cond = np.sum(cond_samples.dot([1,1]) < 0) / len(cond_samples)
+text=f'num particles = {num_particles}, num bottom left: {frac_cond:0.3f} conditional, {frac_rej:0.3f} rejection'
+print(text) 
+plt.title(text)
 
 plt.legend()
 ax = plt.gca()
