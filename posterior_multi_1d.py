@@ -8,14 +8,20 @@ import torch
 
 from mixture import GaussianMixture
 
-def compute_score(x, t, R, weights=np.ones(2) * 0.5, variances=np.zeros(2)):
-    eff_covar = t * np.eye(2)
+def compute_score(x, t, R, weights=np.ones(2) * 0.5, variances=np.zeros(1)):
+    eff_covar = t * np.eye(1)
     eff_covar[0,0] += variances[0]
-    eff_covar[1,1] += variances[1]
     if len(x.shape) == 3:
-        score = (-((x-R)/(t + variances)) * multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, :, np.newaxis] * weights[0] - ((x + R)/(t+variances)) * multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, :, np.newaxis] * weights[1])/(multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, :, np.newaxis] * weights[0] + multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, :, np.newaxis] * weights[1])
+        score = ((-((x-R)/(t + variances)) * multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, :, np.newaxis] * weights[0] -
+                 ((x + R)/(t+variances)) * multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, :, np.newaxis] * weights[1])/
+                 (multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, :, np.newaxis] * weights[0] +
+                  multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, :, np.newaxis] * weights[1])
+                 )
     else:
-        score = (-((x-R)/(t+variances)) * multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, np.newaxis] * weights[0] - ((x + R)/(t+variances)) * multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, np.newaxis] * weights[1])/(multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, np.newaxis] * weights[0] + multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, np.newaxis] * weights[1])
+        numerator = (-((x-R)/(t+variances)) * multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, np.newaxis] * weights[0] -
+                  ((x + R)/(t+variances)) * multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, np.newaxis] * weights[1])
+        denominator = (multivariate_normal.pdf(x, mean=R, cov=eff_covar)[:, np.newaxis] * weights[0] + multivariate_normal.pdf(x, mean=-R, cov=eff_covar)[:, np.newaxis] * weights[1])
+        score = numerator / denominator
     return score
 
 def compute_score_torch(x, t, R, weights=np.ones(2) * 0.5, variances=torch.zeros(2)):
@@ -125,7 +131,7 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
     measurement_var: real, noise in each coordinate
     y: m long vector  [m = 2 atm]
     """
-    variances = np.zeros(2) + 0.1
+    variances = np.zeros(1) + 0.1
     y = torch.tensor(y)
     # XXX must be spherical for GaussianMixture atm
     dim = R.shape[0]
@@ -142,21 +148,14 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
     logw = p.logptilde(schedule[0], x, y, measurement_A, measurement_var)
 
     #logw = logw * 0.
-    plt.ion()
-
-    resample_count = 100000
+    #plt.ion()
 
     counts = []
     for i in range(1, len(schedule)):
         t = schedule[i]
         tgap = schedule[i-1] - schedule[i]
 
-        if i % resample_count == 0 or i == len(schedule)-1:# or i == 1:
-            print('W range:', torch.exp(logw.max() - logw.min()))
-            oldx = resample(x, logw, num_particles)
-            logw = logw * 0.
-        else:
-            oldx = x.clone().detach()
+        oldx = resample(x, logw, num_particles)
 
         # XXX paper uses schedule[i]
         center = oldx + tgap * p.stilde(schedule[i-1], oldx, y, measurement_A, measurement_var)
@@ -166,7 +165,7 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
         #print(f'Variance: {torch.mean(x**2, axis=0).detach().numpy()}/{t+variances[0]} = {(torch.mean(x**2, axis=0)/(t+variances[0])).detach().numpy()}')
         
         #XXX check diffusion SDE
-        logw += lognormpdf(newx - (oldx + tgap * p.getSmoothed(schedule[i-1]).score(oldx)), tgap)
+        logw = lognormpdf(newx - (oldx + tgap * p.getSmoothed(schedule[i-1]).score(oldx)), tgap)
         logw -= lognormpdf(newx - center, tgap)
         logw += p.logptilde(t, newx, y, measurement_A, measurement_var)
         logw -= p.logptilde(schedule[i-1], oldx, y, measurement_A, measurement_var)
@@ -192,7 +191,7 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
             plt.show()
 
             plt.subplot(122)
-            x2 = x.reshape(num_samples, num_particles, 2)
+            x2 = x.reshape(num_samples, num_particles, 1)
             # import code
             # d = globals()
             # d.update(locals())
@@ -205,7 +204,7 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
             #print(f'Variance: {torch.mean(x**2, axis=0)}')
         
     x = x.numpy()
-    x = x.reshape(num_samples, num_particles, 2)
+    x = x.reshape(num_samples, num_particles, 1)
     if False:
         plt.subplot(122)
         plt.plot(counts)
@@ -214,15 +213,14 @@ def twisted_diffusion_eric(R, schedule, num_steps, measurement_A, measurement_va
         d.update(locals())
         
         code.interact(local=d)
-    plt.ioff()
+    #plt.ioff()
     #plt.scatter(x[:,0], x[:,1])
     #plt.show()
-    return x[:,:,:]
+    return x#[:,0,:]
 
 def twisted_diffusion(R, schedule, num_steps, measurement_A, measurement_var, y, num_samples=500, num_particles=1000):
-    variances = np.zeros(2)
+    variances = np.zeros(1)
     variances[0] = 0.1
-    variances[1] = 0.1
     dim = R.shape[0]
     cond_samples = np.random.normal(0, np.sqrt(schedule[0]), size=(num_samples, num_particles, dim))
     cur_time = schedule[0]
@@ -369,17 +367,16 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
 
 def annealed_uncond_langevin(R, schedule, num_samples=50):
     num_steps = len(schedule)
-    variances = np.zeros(2)
+    variances = np.zeros(1)
     variances[0] = 0.1
-    variances[1] = 0.1
     start_time = schedule[0]
     end_time = schedule[-1]
-    uncond_samples = np.random.multivariate_normal(np.zeros(2), start_time * np.eye(2), num_samples)
+    uncond_samples = np.random.multivariate_normal(np.zeros(1), start_time * np.eye(1), num_samples)
     for it in range(1, num_steps):
         cur_time = schedule[it]
         step_size = schedule[it-1] - schedule[it]
 
-        
+
         uncond_score = compute_score(uncond_samples, cur_time, R, variances=variances)
 
         #print(step_size)
@@ -389,7 +386,7 @@ def annealed_uncond_langevin(R, schedule, num_samples=50):
         # print(cur_time, ':')
         # print(np.linalg.norm(uncond_score - uncond_score2.numpy()))
         
-        uncond_samples = uncond_samples + step_size * uncond_score + np.random.multivariate_normal(np.zeros(2), step_size * np.eye(2), num_samples)
+        uncond_samples = uncond_samples + step_size * uncond_score + np.random.multivariate_normal(np.zeros(1), step_size * np.eye(1), num_samples)
         if it % 100000 == 0:
             print('it:', it, 'time:', schedule[it])
             plt.scatter(uncond_samples[:, 0], uncond_samples[:, 1])
@@ -429,17 +426,12 @@ def vectorized_gaussian_logpdf_single_mean(x, mean, covariance):
 
 #Parameters
 R = np.ones(2)
-R = np.array([1, 1.])
-num_steps = 800
-end_time = 0.01
-num_particles = 1
-num_samples = 1000
-
-
-
-#schedule = create_time_schedule_eric(end_time, num_steps, num_steps)
+R = np.array([1.])
+num_steps = 50
+end_time = 0.0001
+num_particles = 100
+num_samples = 5000
 schedule = create_time_schedule_eric(end_time, num_steps, num_steps)
-
 #schedule = create_time_schedule(num_steps, end_time, 0.025)
 #print(schedule)
 #plt.plot(schedule)
@@ -456,19 +448,19 @@ uncond_samples = annealed_uncond_langevin(R, schedule, 5000)
 
 #print('done with uncond')
 
-meas_A = np.array([[0, 0], [0, 1]])
+meas_A = np.array([[1]])
 meas_var = 0.1
 #meas_var = 1e-2
-meas_y = np.array([0, 0.2])
+meas_y = np.array([0.2])
 #plt.savefig(str(num_particles) + '_particles.pdf')
 #plt.show()
 
-x, y = np.mgrid[-20:20:0.01, -20:20:0.01]
-pos = np.dstack((x, y))
-print('pos:', pos.shape)
+#x, y = np.mgrid[-20:20:0.01, -20:20:0.01]
+#pos = np.dstack((x, y))
+#print('pos:', pos.shape)
 #uncond_density1 = 0.5 * multivariate_normal.pdf(pos, R, end_time * np.eye(2)) + 0.5 * multivariate_normal.pdf(pos, -R, end_time * np.eye(2))
 #uncond_density2 = np.log(0.5) + scipy.special.logsumexp((multivariate_normal.logpdf(pos, R, end_time * np.eye(2)), multivariate_normal.logpdf(pos, -R, end_time * np.eye(2))))
-uncond_density = np.log(0.5) + np.logaddexp(vectorized_gaussian_logpdf_single_mean(pos, R, end_time * np.eye(2)), vectorized_gaussian_logpdf_single_mean(pos, -R, end_time * np.eye(2)))
+#uncond_density = np.log(0.5) + np.logaddexp(vectorized_gaussian_logpdf_single_mean(pos, R, end_time * np.eye(2)), vectorized_gaussian_logpdf_single_mean(pos, -R, end_time * np.eye(2)))
 #uncond_density = np.exp(uncond_density)
 #uncond_density /= np.sum(uncond_density)
 #print('uncond density shape:', uncond_density.shape)
@@ -497,15 +489,17 @@ cond_samples = twisted_diffusion_eric(R, schedule, num_steps, meas_A, meas_var, 
 #flat_uncond_density = uncond_density.flatten()
 # sample_index = np.random.choice(np.arange(len(x) * len(y)), p=flat_density, size=num_samples, replace=False)
 
-plt.scatter(*cond_samples[:,0,:].T, label='Twisted Diffusion Particle Filter (Eric)')
+#plt.scatter(cond_samples[:, 0, 0], cond_samples[:, 0, 0], label='Twisted Diffusion Particle Filter (Eric)')
 #plt.scatter(cond_samples2[:, 0], cond_samples2[:, 1], label='Twisted Diffusion Particle Filter (Shivam)')
 
-rej_samples = rejection_sampler(R, schedule, num_steps, num_samples, meas_y, meas_A, meas_var)
-plt.scatter(*rej_samples.T, label='Rejection Sampling')
+rej_samples = rejection_sampler(R, schedule, num_steps, 20000, meas_y, meas_A, meas_var)
+#plt.scatter(rej_samples[:, 0], rej_samples[:, 0], label='Rejection Sampling')
+plt.hist(cond_samples.flatten(), bins=20, density=True, histtype='step')
+plt.hist(rej_samples, bins=20, density=True, histtype='step')
 
 cond_samples = np.array(cond_samples)
-frac_rej = np.mean(rej_samples.dot([1,1]) < 0)
-frac_cond = np.mean(cond_samples.dot([1,1]) < 0)
+frac_rej = np.mean(rej_samples.dot([1]) < 0)
+frac_cond = np.mean(cond_samples.dot([1]) < 0)
 text=f'num particles = {num_particles}, num bottom left: {frac_cond:0.3f} conditional, {frac_rej:0.3f} rejection'
 print(text) 
 plt.title(text)
@@ -518,11 +512,15 @@ plt.savefig(str(num_particles) + '_particles_vectorized.pdf')
 plt.show()
 
 
-
-
 plt.ion()
 plt.clf()
+rej_samples = rej_samples[:,0]
+cond_samples = cond_samples[:,:,0]
+print(f'Cond: {np.mean(cond_samples > 0):.2f} Rej: {np.mean(rej_samples > 0):.2f}')
+plt.hist(cond_samples.flatten(), bins=20, density=True, histtype='step')
+plt.hist(rej_samples, bins=20, density=True, histtype='step')
 import code
 d = globals()
 d.update(locals())
+
 code.interact(local=d)
