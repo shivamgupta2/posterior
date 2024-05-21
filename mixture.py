@@ -4,14 +4,20 @@ import torch
 from scipy import stats
 
 
+def as_tensor(a):
+    if not isinstance(a, torch.Tensor):
+        a = torch.tensor(a, dtype=torch.float64)
+    return a.clone().detach()
+    
+
 class GaussianMixture:
     def __init__(self, d, rs, ps=None, centers=None):
         self.d = d
         self.k = len(rs)
         if centers is None:
             centers = np.random.randn(self.k, d) / d**.5
-        self.centers = torch.tensor(centers)
-        self.rs = torch.tensor(rs, dtype=torch.float64)
+        self.centers = as_tensor(centers)
+        self.rs = as_tensor(rs)
         self.Iests = {}
         if ps is None:
             ps = np.array([1]*self.k)
@@ -111,7 +117,6 @@ class GaussianMixture:
             ans += np.sum(SST, axis=0)
         return ans / N
 
-
     def getSmoothed(self, r2):
         return GaussianMixture(self.d, np.sqrt(self.rs**2 + r2), self.ps, self.centers)
 
@@ -129,7 +134,7 @@ class GaussianMixture:
 
     def stilde(self, t, xs, y, measurement_A, measurement_var):
         torch.autograd.set_detect_anomaly(True)
-        xs = torch.tensor(xs)
+        xs = as_tensor(xs)
         xs.requires_grad_()
         pt = self.getSmoothed(t)
         score = pt.score(xs)

@@ -432,8 +432,8 @@ R = np.ones(2)
 R = np.array([1, 1.])
 num_steps = 800
 end_time = 0.01
-num_particles = 1
-num_samples = 1000
+num_particles = 10
+num_samples = 10000
 
 
 
