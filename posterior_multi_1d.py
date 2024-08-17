@@ -358,10 +358,11 @@ def particle_filter(R, schedule, num_steps, measurement_A, measurement_var, y, n
         
         log_probs_term_2 = vectorized_gaussian_logpdf(next_samples, cur_samples + step_size * uncond_score, step_size * np.eye(dim))
         log_probs_term_3 = vectorized_gaussian_logpdf(next_samples, x_N_minus_it_means, x_N_minus_it_covar)
-        last_log_probs = vectorized_gaussian_logpdf(noisy_y[:,it-1,:], np.einsum('ij,klj->kli', measurement_A, next_samples), (measurement_var + step_size) * np.eye(dim))
+        #last_log_probs = vectorized_gaussian_logpdf(noisy_y[:,it-1,:], np.einsum('ij,klj->kli', measurement_A, next_samples), (measurement_var + step_size) * np.eye(dim))
+        last_log_probs = vectorized_gaussian_logpdf(noisy_y[:,it-1,:], np.einsum('ij,klj->kli', measurement_A, cur_samples), (measurement_var + step_size) * np.eye(dim))
         log_probs = log_probs_term_1 + log_probs_term_2 - log_probs_term_3 - last_log_probs
-        last_log_probs = log_probs_term_1
-
+        #last_log_probs = log_probs_term_1
+        
         probs = np.exp(log_probs - np.max(log_probs, axis=1)[:, np.newaxis])
         probs /= np.sum(probs, axis=1)[:, np.newaxis]
 
@@ -460,8 +461,8 @@ R = np.ones(2)
 R = np.array([1.])
 num_steps = 100
 end_time = 0.0001
-num_particles = 1
-num_samples = 100000
+num_particles = 100
+num_samples = 10000
 schedule = create_time_schedule_eric(end_time, num_steps, num_steps)
 #schedule = create_time_schedule(num_steps, end_time, 0.025)
 #print(schedule)
@@ -531,7 +532,7 @@ elif method == 'tds':
 #plt.scatter(cond_samples[:, 0, 0], cond_samples[:, 0, 0], label='Twisted Diffusion Particle Filter (Eric)')
 #plt.scatter(cond_samples2[:, 0], cond_samples2[:, 1], label='Twisted Diffusion Particle Filter (Shivam)')
 
-if False:
+if True:
     rej_samples = rejection_sampler(R, schedule, num_steps, 20000, meas_y, meas_A, meas_var)
 else:
     rej_samples = np.zeros((num_steps, 1))

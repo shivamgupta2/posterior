@@ -442,8 +442,8 @@ R = np.ones(2)
 R = np.array([1.])
 num_steps = 50
 end_time = 0.0001
-num_particles = 1000000
-num_samples = 1
+num_particles = 50
+num_samples = 500
 schedule = create_time_schedule_eric(end_time, num_steps, num_steps)
 #schedule = create_time_schedule(num_steps, end_time, 0.025)
 #print(schedule)

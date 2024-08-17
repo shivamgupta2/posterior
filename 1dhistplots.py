@@ -46,10 +46,10 @@ def hist(samples, bins=None, **kws):
 
 
 toplot = []
-#toplot.append('TDS-samples')
+toplot.append('TDS-samples')
 #toplot.append('TDS-prior')
 #toplot.append('Song-samples')
-toplot.append('TDS-prior')
+#toplot.append('Both-means')
 
 
 if 'TDS-samples' in toplot:
@@ -66,7 +66,7 @@ if 'TDS-samples' in toplot:
     plt.legend(loc='upper left')
     plt.ylim([0, None])
     #plt.yticks([])
-    plt.title('Sample Distribution')
+    plt.title('TDS Sample Distribution')
     plt.tight_layout()
     #plt.show()
     plt.savefig('1d-samples.pdf')
